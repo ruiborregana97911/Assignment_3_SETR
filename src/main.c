@@ -93,10 +93,20 @@ int main(void)
         return(ret);
     }
 
+	static rtdb_t RTDB = {
+		.cur_temp = 25,
+		.setpoint = 30,
+		.max_temp = 50,
+		.system_on = false
+	};
+	printk("RTDB initialized\n");	
+
+	
+
 	printk("Press the button\n");
 	
 	while (1) {
-		/* If we have an LED, match its state to the button's. */
+		/* Read the button state and set the LED state accordingly */
 		int val = gpio_pin_get_dt(&button1);
 
 		if (val >= 0) {
