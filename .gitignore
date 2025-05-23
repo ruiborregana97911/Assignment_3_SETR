@@ -1,0 +1,19 @@
+# Diretórios de build
+build/
+zephyr/
+
+# Binários e objetos
+*.o
+*.bin
+*.elf
+*.hex
+
+# Logs e temporários
+*.log
+*.swp
+*.pyc
+__pycache__/
+
+# Pastas de IDEs
+.vscode/
+.idea/
