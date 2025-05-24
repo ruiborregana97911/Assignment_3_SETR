@@ -11,17 +11,20 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/printk.h>
 #include <inttypes.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/sys/mutex.h>
+#include <stdlib.h>
+
 
 #define SLEEP_TIME_MS	1
+#define STACK_SIZE 512
+#define PRIORITY_THREAD_TEMP 5
+#define PRIORITY_THREAD_LED 5
 
 /*
  * Get button configuration from the devicetree sw0 alias. This is mandatory.
  */
 #define SW0_NODE	DT_ALIAS(sw0)	// sw0 is the button 1
-#if !DT_NODE_HAS_STATUS(SW0_NODE, okay)
-#error "Unsupported board: sw0 devicetree alias is not defined"
-#endif
-
 #define SW1_NODE	DT_ALIAS(sw1)	// sw1 is the button 2
 #define SW3_NODE	DT_ALIAS(sw3)	// sw3 is the button 4
 
@@ -46,6 +49,14 @@ typedef struct {
     bool system_on;    // ON/OFF do sistema
 } rtdb_t;
 
+K_MUTEX_DEFINE(rtdb_mutex);
+
+static rtdb_t RTDB = {
+	.cur_temp = 25,
+	.setpoint = 30,
+	.max_temp = 50,
+	.system_on = false
+};
 
 
 static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios,
@@ -76,52 +87,98 @@ static struct gpio_dt_spec led4 = GPIO_DT_SPEC_GET_OR(LED3_NODE, gpios,
 /* hardware configurations */
 int HWInit(void);
 
+void update_leds(void);
+
+void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+
+/* Thread IDs */
+k_tid_t temp_sensor_tid;
+k_tid_t led_control_tid;
+
+K_THREAD_STACK_DEFINE(temp_sensor_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(led_control_stack, STACK_SIZE);
+static struct k_thread temp_sensor_data;
+static struct k_thread led_control_data;
+
+void temp_sensor_thread(void *p1, void *p2, void *p3);
+
+void led_control_thread(void *p1, void *p2, void *p3);
 
 
-void button_pressed(const struct device *dev, struct gpio_callback *cb,
-		    uint32_t pins)
-{
-	printk("Button pressed at %" PRIu32 "\n", k_cycle_get_32());
-}
 
 int main(void)
 {
-	int ret=0;
+	int ret = 0;
 
-    if((ret = HWInit())) {
+    if ((ret = HWInit())) {
         printk("HW initialization error!\n");
-        return(ret);
+        return ret;
     }
 
-	static rtdb_t RTDB = {
-		.cur_temp = 25,
-		.setpoint = 30,
-		.max_temp = 50,
-		.system_on = false
-	};
-	printk("RTDB initialized\n");	
+    printk("RTDB initialized\n");
+    printk("System running with threads\n");
 
-	
+    temp_sensor_tid = k_thread_create(&temp_sensor_data, temp_sensor_stack, STACK_SIZE,
+                    temp_sensor_thread, NULL, NULL, NULL,
+                    PRIORITY_THREAD_TEMP, 0, K_NO_WAIT);
 
-	printk("Press the button\n");
-	
-	while (1) {
-		/* Read the button state and set the LED state accordingly */
-		int val = gpio_pin_get_dt(&button1);
+    led_control_tid = k_thread_create(&led_control_data, led_control_stack, STACK_SIZE,
+                    led_control_thread, NULL, NULL, NULL,
+                    PRIORITY_THREAD_LED, 0, K_NO_WAIT);
 
-		if (val >= 0) {
-			gpio_pin_set_dt(&led1, val);
-		}
+    while (1) {
+        k_sleep(K_FOREVER);
+    }
 
-
-
-		k_msleep(SLEEP_TIME_MS);
-	}
-	
-	return 0;
+    return 0;
 }
 
+void update_leds(void) {
+	k_mutex_lock(&rtdb_mutex, K_FOREVER);
+    bool on = RTDB.system_on;
+    int temp = RTDB.cur_temp;
+    int sp = RTDB.setpoint;
+    k_mutex_unlock(&rtdb_mutex);
 
+    gpio_pin_set_dt(&led1, on);
+    gpio_pin_set_dt(&led2, on && abs(temp - sp) <= 2);
+    gpio_pin_set_dt(&led3, on && temp < sp - 2);
+    gpio_pin_set_dt(&led4, on && temp > sp + 2);
+}
+
+void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
+    k_mutex_lock(&rtdb_mutex, K_FOREVER);
+    if (pins & BIT(button1.pin)) {
+        RTDB.system_on = !RTDB.system_on;
+        printk("System is now %s\n", RTDB.system_on ? "ON" : "OFF");
+    } else if (pins & BIT(button2.pin)) {
+        RTDB.setpoint++;
+        printk("Setpoint increased: %d°C\n", RTDB.setpoint);
+    } else if (pins & BIT(button4.pin)) {
+        RTDB.setpoint--;
+        printk("Setpoint decreased: %d°C\n", RTDB.setpoint);
+    }
+    k_mutex_unlock(&rtdb_mutex);
+    update_leds();
+}
+
+void temp_sensor_thread(void *p1, void *p2, void *p3) {
+    int fake_temp = 25;
+    while (1) {
+        fake_temp = (fake_temp >= 40) ? 20 : fake_temp + 1;
+        k_mutex_lock(&rtdb_mutex, K_FOREVER);
+        RTDB.cur_temp = fake_temp;
+        k_mutex_unlock(&rtdb_mutex);
+        k_sleep(K_SECONDS(2));
+    }
+}
+
+void led_control_thread(void *p1, void *p2, void *p3) {
+    while (1) {
+        update_leds();
+        k_sleep(K_MSEC(500));
+    }
+}
 
 
 int HWInit(void){
