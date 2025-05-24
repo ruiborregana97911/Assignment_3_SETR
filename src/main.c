@@ -17,7 +17,7 @@
 
 
 #define SLEEP_TIME_MS	1
-#define STACK_SIZE 512
+#define STACK_SIZE 1024
 #define PRIORITY_THREAD_TEMP 5
 #define PRIORITY_THREAD_LED 5
 
@@ -59,30 +59,23 @@ static rtdb_t RTDB = {
 };
 
 
-static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios,
-	{0});
+static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
 static struct gpio_callback button1_cb_data;
 
-static const struct gpio_dt_spec button2 = GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios,
-	{0});
+static const struct gpio_dt_spec button2 = GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0});
 static struct gpio_callback button2_cb_data;
 
-static const struct gpio_dt_spec button4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios,
-	{0});
+static const struct gpio_dt_spec button4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios, {0});
 static struct gpio_callback button4_cb_data;
 
 /*
  * The led0 devicetree alias is optional. If present, we'll use it
  * to turn on the LED whenever the button is pressed.
  */
-static struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET_OR(LED0_NODE, gpios,
-						     {0});
-static struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET_OR(LED1_NODE, gpios,
-						     {0});
-static struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET_OR(LED2_NODE, gpios,
-						     {0});
-static struct gpio_dt_spec led4 = GPIO_DT_SPEC_GET_OR(LED3_NODE, gpios,
-						     {0});
+static struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET_OR(LED0_NODE, gpios, {0});
+static struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET_OR(LED1_NODE, gpios, {0});
+static struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET_OR(LED2_NODE, gpios, {0});
+static struct gpio_dt_spec led4 = GPIO_DT_SPEC_GET_OR(LED3_NODE, gpios, {0});
 							 
 /* hardware configurations */
 int HWInit(void);
@@ -126,9 +119,6 @@ int main(void)
                     led_control_thread, NULL, NULL, NULL,
                     PRIORITY_THREAD_LED, 0, K_NO_WAIT);
 
-    while (1) {
-        k_sleep(K_FOREVER);
-    }
 
     return 0;
 }
@@ -151,12 +141,19 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t
     if (pins & BIT(button1.pin)) {
         RTDB.system_on = !RTDB.system_on;
         printk("System is now %s\n", RTDB.system_on ? "ON" : "OFF");
-    } else if (pins & BIT(button2.pin)) {
-        RTDB.setpoint++;
-        printk("Setpoint increased: %d°C\n", RTDB.setpoint);
-    } else if (pins & BIT(button4.pin)) {
+
+    } else if ((pins & BIT(button2.pin)) && RTDB.system_on) {
+		if (RTDB.setpoint < RTDB.max_temp) {
+			RTDB.setpoint++;
+			printk("Setpoint increased: %d°C\n", RTDB.setpoint);
+		} else {
+			printk("Setpoint already at maximum: %d°C\n", RTDB.max_temp);
+		}
+
+    } else if ((pins & BIT(button4.pin)) && RTDB.system_on) {
         RTDB.setpoint--;
         printk("Setpoint decreased: %d°C\n", RTDB.setpoint);
+		
     }
     k_mutex_unlock(&rtdb_mutex);
     update_leds();
@@ -169,15 +166,29 @@ void temp_sensor_thread(void *p1, void *p2, void *p3) {
         k_mutex_lock(&rtdb_mutex, K_FOREVER);
         RTDB.cur_temp = fake_temp;
         k_mutex_unlock(&rtdb_mutex);
-        k_sleep(K_SECONDS(2));
+		printk("Current temperature: %d°C\n", fake_temp);
+        k_sleep(K_SECONDS(10));
     }
 }
 
 void led_control_thread(void *p1, void *p2, void *p3) {
     while (1) {
-        update_leds();
+		k_mutex_lock(&rtdb_mutex, K_FOREVER);
+        bool sys_on = RTDB.system_on;
+        k_mutex_unlock(&rtdb_mutex);
+
+        if (sys_on) {
+            update_leds();
+        } else {
+            gpio_pin_set_dt(&led1, 0);
+            gpio_pin_set_dt(&led2, 0);
+            gpio_pin_set_dt(&led3, 0);
+            gpio_pin_set_dt(&led4, 0);
+        }
+
         k_sleep(K_MSEC(500));
     }
+    
 }
 
 
