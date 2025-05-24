@@ -14,12 +14,17 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/sys/mutex.h>
 #include <stdlib.h>
+#include <zephyr/drivers/pwm.h>		
 
 
 #define SLEEP_TIME_MS	1
 #define STACK_SIZE 1024
 #define PRIORITY_THREAD_TEMP 5
 #define PRIORITY_THREAD_LED 5
+#define PRIORITY_THREAD_PWM 5
+
+#define PWM_NODE    DT_ALIAS(pwm_led0) 
+#define PWM_PERIOD_USEC 1000
 
 /*
  * Get button configuration from the devicetree sw0 alias. This is mandatory.
@@ -47,6 +52,10 @@ typedef struct {
     int setpoint;      // Temperatura desejada
     int max_temp;      // Temperatura máxima de segurança
     bool system_on;    // ON/OFF do sistema
+	float kp, ki, kd;
+	float prev_error;
+	float integral;		// PID controller parameters
+
 } rtdb_t;
 
 K_MUTEX_DEFINE(rtdb_mutex);
@@ -55,7 +64,13 @@ static rtdb_t RTDB = {
 	.cur_temp = 25,
 	.setpoint = 30,
 	.max_temp = 50,
-	.system_on = false
+	.system_on = false, 
+	.kp = 5.0f,
+	.ki = 0.5f,
+	.kd = 0.0f,
+	.prev_error = 0.0f,
+	.integral = 0.0f
+	
 };
 
 
@@ -76,6 +91,8 @@ static struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET_OR(LED0_NODE, gpios, {0});
 static struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET_OR(LED1_NODE, gpios, {0});
 static struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET_OR(LED2_NODE, gpios, {0});
 static struct gpio_dt_spec led4 = GPIO_DT_SPEC_GET_OR(LED3_NODE, gpios, {0});
+
+static const struct pwm_dt_spec heater_pwm = PWM_DT_SPEC_GET(PWM_NODE);	
 							 
 /* hardware configurations */
 int HWInit(void);
@@ -84,18 +101,25 @@ void update_leds(void);
 
 void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
+float pid_compute(float kp,float ki,float kd,float prev,float intg, float setpoint, float temp, float dt);
+
 /* Thread IDs */
 k_tid_t temp_sensor_tid;
 k_tid_t led_control_tid;
+k_tid_t pwm_tid;
 
 K_THREAD_STACK_DEFINE(temp_sensor_stack, STACK_SIZE);
 K_THREAD_STACK_DEFINE(led_control_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(pwm_stack, STACK_SIZE);
 static struct k_thread temp_sensor_data;
 static struct k_thread led_control_data;
+static struct k_thread pwm_data;
 
 void temp_sensor_thread(void *p1, void *p2, void *p3);
 
 void led_control_thread(void *p1, void *p2, void *p3);
+
+void pwm_control_thread(void *p1, void *p2, void *p3);
 
 
 
@@ -118,6 +142,10 @@ int main(void)
     led_control_tid = k_thread_create(&led_control_data, led_control_stack, STACK_SIZE,
                     led_control_thread, NULL, NULL, NULL,
                     PRIORITY_THREAD_LED, 0, K_NO_WAIT);
+
+	pwm_tid = k_thread_create(&pwm_data, pwm_stack, STACK_SIZE,
+		pwm_control_thread, NULL, NULL, NULL,
+		PRIORITY_THREAD_PWM, 0, K_NO_WAIT);
 
 
     return 0;
@@ -153,7 +181,7 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t
     } else if ((pins & BIT(button4.pin)) && RTDB.system_on) {
         RTDB.setpoint--;
         printk("Setpoint decreased: %d°C\n", RTDB.setpoint);
-		
+
     }
     k_mutex_unlock(&rtdb_mutex);
     update_leds();
@@ -189,6 +217,38 @@ void led_control_thread(void *p1, void *p2, void *p3) {
         k_sleep(K_MSEC(500));
     }
     
+}
+
+/*esta parte nao funciona ver como fazer de forma correta!!!*/
+
+float pid_compute(float setpoint, float temp, float dt) {
+	k_mutex_lock(&rtdb_mutex, K_FOREVER);
+    float error = RTDB.setpoint - RTDB.cur_temp;
+    intg += error * dt;
+    float derivative = (error - prev) / dt;
+    prev = error;
+	k_mutex_unlock(&rtdb_mutex);
+    return rtdb->pid.kp * error + rtdb->pid.ki * rtdb->pid.integral + rtdb->pid.kd * derivative;
+}
+
+
+void pwm_control_thread(void *p1, void *p2, void *p3) {
+    while (1) {
+        k_mutex_lock(&rtdb_mutex, K_FOREVER);
+        bool sys_on = RTDB.system_on;
+        k_mutex_unlock(&rtdb_mutex);
+
+        if (sys_on) {
+            float out = pid_compute((float)sp, (float)temp, 0.5f);
+            int duty = CLAMP(out, 0, 100);
+            pwm_set_dt(&heater_pwm, PWM_USEC(PWM_PERIOD_USEC), PWM_USEC(PWM_PERIOD_USEC * duty / 100));
+            printk("[PWM] Duty set to: %d%%\n", duty);
+        } else {
+            pwm_set_dt(&heater_pwm, PWM_USEC(PWM_PERIOD_USEC), PWM_USEC(0));
+        }
+
+        k_sleep(K_MSEC(500));
+    }
 }
 
 
