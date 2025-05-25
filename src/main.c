@@ -23,7 +23,7 @@
 #define PRIORITY_THREAD_LED 5
 #define PRIORITY_THREAD_PWM 5
 
-#define PWM_NODE    DT_ALIAS(pwm_led0) 
+#define PWM_NODE    DT_NODELABEL(pwm_led2)	// heaterpwm is the PWM node for the heater
 #define PWM_PERIOD_USEC 1000
 
 /*
@@ -247,6 +247,7 @@ void pwm_control_thread(void *p1, void *p2, void *p3) {
         if (sys_on) {
             float out = pid_compute(kp, ki, kd, &prev_error, &integral, (float)sp, (float)temp, 0.5f);
             int duty = CLAMP(out, 0, 100);
+			//int duty = 50; // For testing, set a fixed duty cycle
             pwm_set_dt(&heater_pwm, PWM_USEC(PWM_PERIOD_USEC), PWM_USEC(PWM_PERIOD_USEC * duty / 100));
             printk("[PWM] Duty set to: %d%%\n", duty);
         } else {
@@ -404,6 +405,15 @@ int HWInit(void){
 	gpio_pin_set_dt(&led2, 0);
 	gpio_pin_set_dt(&led3, 0);
 	gpio_pin_set_dt(&led4, 0);
+
+
+	/* PWM configuration */
+	if (!device_is_ready(heater_pwm.dev)) {
+		printk("Error: PWM device %s is not ready\n", heater_pwm.dev->name);
+		return ERR_RDY;
+	}
+	
+
 
 
 
