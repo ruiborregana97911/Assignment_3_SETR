@@ -58,7 +58,13 @@
 	};
 };
 
-
+&i2c0 {
+    tc74sensor: tc74sensor@4D{
+        compatible = "i2c-device";
+        reg = < 0x4D >;		
+        label = "TC74SENSOR";
+    };
+};
 
 
 

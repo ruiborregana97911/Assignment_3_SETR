@@ -15,6 +15,7 @@
 #include <zephyr/sys/mutex.h>
 #include <stdlib.h>
 #include <zephyr/drivers/pwm.h>		
+#include <zephyr/drivers/i2c.h>
 
 
 #define SLEEP_TIME_MS	1
@@ -25,6 +26,9 @@
 
 #define PWM_NODE    DT_NODELABEL(pwm_led2)	// heaterpwm is the PWM node for the heater
 #define PWM_PERIOD_USEC 1000
+
+#define TC74_CMD_RTR 0x00   /* Read temperature command */
+#define TC74_CMD_RWCR 0x01  /* Read/write configuration register */
 
 /*
  * Get button configuration from the devicetree sw0 alias. This is mandatory.
@@ -37,6 +41,10 @@
 #define LED1_NODE	DT_ALIAS(led1)	// led1 is the LED 2
 #define LED2_NODE	DT_ALIAS(led2)	// led2 is the LED 3
 #define LED3_NODE	DT_ALIAS(led3)	// led3 is the LED 4
+
+/* I2C device vars and defines */
+#define I2C0_NID DT_NODELABEL(tc74sensor)
+
 
 /* Error codes */
 #define ERR_OK  0       // All fine
@@ -91,6 +99,8 @@ static struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET_OR(LED2_NODE, gpios, {0});
 static struct gpio_dt_spec led4 = GPIO_DT_SPEC_GET_OR(LED3_NODE, gpios, {0});
 
 static const struct pwm_dt_spec heater_pwm = PWM_DT_SPEC_GET(PWM_NODE);	
+
+static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(I2C0_NID);
 							 
 /* hardware configurations */
 int HWInit(void);
@@ -186,14 +196,27 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t
 }
 
 void temp_sensor_thread(void *p1, void *p2, void *p3) {
-    int fake_temp = 25;
+
+    uint8_t temp = 0;
+	int ret=0;
     while (1) {
-        fake_temp = (fake_temp >= 40) ? 20 : fake_temp + 1;
-        k_mutex_lock(&rtdb_mutex, K_FOREVER);
-        RTDB.cur_temp = fake_temp;
+		k_mutex_lock(&rtdb_mutex, K_FOREVER);
+        bool sys_on = RTDB.system_on;
         k_mutex_unlock(&rtdb_mutex);
-		printk("Current temperature: %d°C\n", fake_temp);
-        k_sleep(K_SECONDS(10));
+		if(sys_on){
+			/* Read temperature register */       
+			ret = i2c_read_dt(&dev_i2c, &temp, sizeof(temp));
+			if(ret != 0){
+				printk("Failed to read from I2C device at address %x, register  at Reg. %x \n\r", dev_i2c.addr,TC74_CMD_RTR);      
+			}
+			else{
+				k_mutex_lock(&rtdb_mutex, K_FOREVER);
+				RTDB.cur_temp = temp;
+				k_mutex_unlock(&rtdb_mutex);
+				printk("[SENSOR] Current temperature: %d°C\n", temp);
+				k_sleep(K_MSEC(500));
+			}
+		}
     }
 }
 
@@ -413,6 +436,20 @@ int HWInit(void){
 		return ERR_RDY;
 	}
 	
+	/* I2C configuration*/
+	if (!device_is_ready(dev_i2c.bus)) {
+	    printk("I2C bus %s is not ready!\n\r",dev_i2c.bus->name);
+	    return ERR_RDY;
+    } else {
+        printk("I2C bus %s, device address %x ready\n\r",dev_i2c.bus->name, dev_i2c.addr);
+    }    
+    
+    /* Write (command RTR) to set the read address to temperature */
+    /* Only necessary if a config done before (not the case), but let's stay in the safe side */
+    ret = i2c_write_dt(&dev_i2c, TC74_CMD_RTR, 1);
+    if(ret != 0){
+        printk("Failed to write to I2C device at address %x, register %x \n\r", dev_i2c.addr ,TC74_CMD_RTR);
+    }
 
 
 
