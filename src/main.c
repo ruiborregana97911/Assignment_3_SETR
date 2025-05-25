@@ -52,9 +52,8 @@ typedef struct {
     int setpoint;      // Temperatura desejada
     int max_temp;      // Temperatura máxima de segurança
     bool system_on;    // ON/OFF do sistema
-	float kp, ki, kd;
-	float prev_error;
-	float integral;		// PID controller parameters
+	float kp, ki, kd;	// Parametros PID
+	
 
 } rtdb_t;
 
@@ -68,8 +67,7 @@ static rtdb_t RTDB = {
 	.kp = 5.0f,
 	.ki = 0.5f,
 	.kd = 0.0f,
-	.prev_error = 0.0f,
-	.integral = 0.0f
+
 	
 };
 
@@ -101,7 +99,7 @@ void update_leds(void);
 
 void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
-float pid_compute(float kp,float ki,float kd,float prev,float intg, float setpoint, float temp, float dt);
+float pid_compute(float kp,float ki,float kd,float *prev,float *intg, float setpoint, float temp, float dt);
 
 /* Thread IDs */
 k_tid_t temp_sensor_tid;
@@ -219,27 +217,35 @@ void led_control_thread(void *p1, void *p2, void *p3) {
     
 }
 
-/*esta parte nao funciona ver como fazer de forma correta!!!*/
 
-float pid_compute(float setpoint, float temp, float dt) {
-	k_mutex_lock(&rtdb_mutex, K_FOREVER);
+
+float pid_compute(float kp,float ki,float kd,float *prev,float *intg, float setpoint, float temp, float dt) {
+	
     float error = RTDB.setpoint - RTDB.cur_temp;
-    intg += error * dt;
-    float derivative = (error - prev) / dt;
-    prev = error;
-	k_mutex_unlock(&rtdb_mutex);
-    return rtdb->pid.kp * error + rtdb->pid.ki * rtdb->pid.integral + rtdb->pid.kd * derivative;
+    *intg += error * dt;
+    float derivative = (error - *prev) / dt;
+    *prev = error;
+    return kp * error + ki * (*intg) + kd * derivative;
 }
 
 
 void pwm_control_thread(void *p1, void *p2, void *p3) {
+
+	float prev_error = 0.0f;
+	float integral = 0.0f;		
+
     while (1) {
         k_mutex_lock(&rtdb_mutex, K_FOREVER);
         bool sys_on = RTDB.system_on;
+		float sp = (float)RTDB.setpoint;
+        float temp = (float)RTDB.cur_temp;
+        float kp = RTDB.kp;
+        float ki = RTDB.ki;
+        float kd = RTDB.kd;
         k_mutex_unlock(&rtdb_mutex);
 
         if (sys_on) {
-            float out = pid_compute((float)sp, (float)temp, 0.5f);
+            float out = pid_compute(kp, ki, kd, &prev_error, &integral, (float)sp, (float)temp, 0.5f);
             int duty = CLAMP(out, 0, 100);
             pwm_set_dt(&heater_pwm, PWM_USEC(PWM_PERIOD_USEC), PWM_USEC(PWM_PERIOD_USEC * duty / 100));
             printk("[PWM] Duty set to: %d%%\n", duty);
