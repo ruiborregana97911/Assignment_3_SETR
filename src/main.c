@@ -244,7 +244,7 @@ void led_control_thread(void *p1, void *p2, void *p3) {
 
 float pid_compute(float kp,float ki,float kd,float *prev,float *intg, float setpoint, float temp, float dt) {
 	
-    float error = RTDB.setpoint - RTDB.cur_temp;
+    float error = setpoint - temp;
     *intg += error * dt;
     float derivative = (error - *prev) / dt;
     *prev = error;
