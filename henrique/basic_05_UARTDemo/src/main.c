@@ -21,7 +21,8 @@ static bool awaiting_enter = false;
 
 int max_temp = 100;
 int current_temp = 75;
-char controller_params[64] = "Kp=1.0,Ti=0.5,Td=0.1";
+char controller_params[64] = "Kp=10,Ki=5,Kd=1";
+int Kp = 10, Ki = 5, Kd = 1;
 
 uint8_t calc_checksum(const char *cmd, const char *data) {
     uint8_t sum = cmd[0];
@@ -90,7 +91,30 @@ void process_frame(const char *frame) {
             break;
         }
         case 'S': {
-            strncpy(controller_params, data, sizeof(controller_params) - 1);
+            if (strlen(data) != 9 || data[0] != 'p' || data[3] != 'i' || data[6] != 'd') {
+                snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+                send_uart_msg(response);
+                break;
+            }
+            char p_str[3] = {data[1], data[2], '\0'};
+            char i_str[3] = {data[4], data[5], '\0'};
+            char d_str[3] = {data[7], data[8], '\0'};
+
+            int p = atoi(p_str);
+            int i = atoi(i_str);
+            int d = atoi(d_str);
+
+            if (p < 0 || i < 0 || d < 0 || p > 99 || i > 99 || d > 99) {
+                snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+                send_uart_msg(response);
+                break;
+            }
+
+            Kp = p;
+            Ki = i;
+            Kd = d;
+
+            snprintf(controller_params, sizeof(controller_params), "Kp=%d,Ki=%d,Kd=%d", Kp, Ki, Kd);
             snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
             send_uart_msg(response);
             break;
