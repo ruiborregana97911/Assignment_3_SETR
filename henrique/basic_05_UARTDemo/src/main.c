@@ -4,39 +4,149 @@
 #include <zephyr/drivers/uart.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define UART_NODE DT_NODELABEL(uart0)
 #define RX_BUF_SIZE 64
-#define RX_TIMEOUT_US 100000  // 100 ms
+#define FRAME_BUF_SIZE 128
+#define TX_BUF_SIZE 128
+#define RX_TIMEOUT_US 100000
 
 const struct device *uart_dev = DEVICE_DT_GET(UART_NODE);
 static uint8_t rx_buf[RX_BUF_SIZE];
-static uint8_t input_buf[128];
-volatile size_t input_pos = 0;
-volatile bool line_ready = false;
+static char frame_buf[FRAME_BUF_SIZE];
+static volatile int frame_pos = 0;
+static volatile bool frame_ready = false;
+static bool awaiting_enter = false;
 
-static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data)
-{
+int max_temp = 100;
+int current_temp = 75;
+char controller_params[64] = "Kp=1.0,Ti=0.5,Td=0.1";
+
+uint8_t calc_checksum(const char *cmd, const char *data) {
+    uint8_t sum = cmd[0];
+    for (size_t i = 0; i < strlen(data); i++) {
+        sum += (uint8_t)data[i];
+    }
+    return sum % 256;
+}
+
+void send_uart_msg(const char *msg) {
+    while (*msg) {
+        uart_tx(uart_dev, msg, 1, SYS_FOREVER_MS);
+        msg++;
+        k_msleep(1);
+    }
+}
+
+void process_frame(const char *frame) {
+    size_t len = strlen(frame);
+    if (len < 5 || frame[0] != '#' || frame[len - 1] != '!') {
+        send_uart_msg("\r\n#Ef000!\r\n");
+        return;
+    }
+
+    char cmd = frame[1];
+    char data[64] = {0};
+    char cs_str[4] = {0};
+
+    if (cmd == 'C') {
+        strncpy(cs_str, &frame[2], 3);
+    } else {
+        int full_len = strlen(frame);
+        int data_len = full_len - 6; // remove # + CMD + CS(3) + !
+        if (data_len > 0 && data_len < (int)sizeof(data)) {
+            strncpy(data, &frame[2], data_len);
+            data[data_len] = '\0';
+        }
+        strncpy(cs_str, &frame[full_len - 4], 3);
+    }
+
+    int received_cs = atoi(cs_str);
+    char cmd_str[2] = {cmd, '\0'};
+    uint8_t computed_cs = calc_checksum(cmd_str, data);
+
+    char response[TX_BUF_SIZE];
+
+    if (computed_cs != received_cs) {
+        snprintf(response, sizeof(response), "\r\n#Es%03d!\r\n", calc_checksum("E", "s"));
+        send_uart_msg(response);
+        return;
+    }
+
+    switch (cmd) {
+        case 'M': {
+            int t = atoi(data);
+            max_temp = t;
+            snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
+            send_uart_msg(response);
+            break;
+        }
+        case 'C': {
+            char t_str[8] = {0};
+            snprintf(t_str, sizeof(t_str), "%03d", current_temp);
+            snprintf(response, sizeof(response), "\r\n#c%s%03d!\r\n", t_str, calc_checksum("c", t_str));
+            send_uart_msg(response);
+            break;
+        }
+        case 'S': {
+            strncpy(controller_params, data, sizeof(controller_params) - 1);
+            snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
+            send_uart_msg(response);
+            break;
+        }
+        default: {
+            snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+            send_uart_msg(response);
+            break;
+        }
+    }
+}
+
+static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data) {
     switch (evt->type) {
         case UART_RX_RDY:
             for (size_t i = 0; i < evt->data.rx.len; i++) {
                 char c = evt->data.rx.buf[evt->data.rx.offset + i];
 
-                // Ecoa o caractere digitado
-                uart_tx(uart_dev, &c, 1, SYS_FOREVER_MS);
-
-                // Se for Enter, termina a linha
                 if (c == '\r' || c == '\n') {
-                    // Pula linha no terminal corretamente
-                    char newline[] = "\r\n";
-                    uart_tx(uart_dev, newline, strlen(newline), SYS_FOREVER_MS);
+                    const char *nl = "\r\n";
+                    uart_tx(uart_dev, nl, strlen(nl), SYS_FOREVER_MS);
+                } else {
+                    uart_tx(uart_dev, &c, 1, SYS_FOREVER_MS);
+                }
 
-                    line_ready = true;
-                    input_buf[input_pos] = '\0';
-                    input_pos = 0;
-                    break;
-                } else if (input_pos < sizeof(input_buf) - 1) {
-                    input_buf[input_pos++] = c;
+                if (frame_pos == 0 && c != '#') {
+                    frame_buf[frame_pos++] = c;
+                    awaiting_enter = true;
+                    continue;
+                }
+
+                if (awaiting_enter) {
+                    if (c == '\r' || c == '\n') {
+                        frame_buf[frame_pos] = '\0';
+                        frame_ready = true;
+                        frame_pos = 0;
+                        awaiting_enter = false;
+                    }
+                    continue;
+                }
+
+                if (c == '!') {
+                    if (frame_pos < FRAME_BUF_SIZE - 1) {
+                        frame_buf[frame_pos++] = c;
+                        awaiting_enter = true;
+                    } else {
+                        send_uart_msg("\r\n#Ef000!\r\n");
+                        frame_pos = 0;
+                        awaiting_enter = false;
+                    }
+                } else if (frame_pos < FRAME_BUF_SIZE - 1) {
+                    frame_buf[frame_pos++] = c;
+                } else {
+                    send_uart_msg("\r\n#Ef000!\r\n");
+                    frame_pos = 0;
+                    awaiting_enter = false;
                 }
             }
             break;
@@ -50,25 +160,20 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
     }
 }
 
-void main(void)
-{
-    if (!device_is_ready(uart_dev)) {
-        return;
-    }
+void main(void) {
+    if (!device_is_ready(uart_dev)) return;
 
     uart_callback_set(uart_dev, uart_cb, NULL);
     uart_rx_enable(uart_dev, rx_buf, sizeof(rx_buf), RX_TIMEOUT_US);
 
-    const char *welcome = "Digite uma linha e pressione Enter:\r\n";
-    uart_tx(uart_dev, welcome, strlen(welcome), SYS_FOREVER_MS);
+    const char *welcome = "Pronto para comandos (#CMD...CS!)\r\n";
+    send_uart_msg(welcome);
 
     while (1) {
-        if (line_ready) {
-            char response[160];
-            snprintf(response, sizeof(response), "Você escreveu: %s\r\n", input_buf);
-            uart_tx(uart_dev, response, strlen(response), SYS_FOREVER_MS);
-            line_ready = false;
+        if (frame_ready) {
+            process_frame(frame_buf);
+            frame_ready = false;
         }
-        k_msleep(100);
+        k_msleep(50);
     }
 }
