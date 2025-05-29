@@ -19,15 +19,12 @@ static volatile int frame_pos = 0;
 static volatile bool frame_ready = false;
 static bool awaiting_enter = false;
 
-// substituir pela estrutura ja feita por ti para interligar os modulos
 int max_temp = 100;
 int current_temp = 75;
-int Kp = 10, Ki = 5, Kd = 1; // dividir por 10 posteriormente para evitar usar floats
-
-
 char controller_params[64] = "Kp=10,Ki=5,Kd=1";
+int Kp = 10, Ki = 5, Kd = 1;
 
-uint8_t calc_checksum(const char *cmd, const char *data) {  
+uint8_t calc_checksum(const char *cmd, const char *data) {
     uint8_t sum = cmd[0];
     for (size_t i = 0; i < strlen(data); i++) {
         sum += (uint8_t)data[i];
@@ -43,7 +40,7 @@ void send_uart_msg(const char *msg) {
     }
 }
 
-void process_frame(const char *frame) { //cmd process do trabalho 2 +-
+void process_frame(const char *frame) {
     size_t len = strlen(frame);
     if (len < 5 || frame[0] != '#' || frame[len - 1] != '!') {
         send_uart_msg("\r\n#Ef171!\r\n");
@@ -196,9 +193,7 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
     }
 }
 
-void main(void) {
-    if (!device_is_ready(uart_dev)) return;
-
+void uart_task(void *arg1, void *arg2, void *arg3) {
     uart_callback_set(uart_dev, uart_cb, NULL);
     uart_rx_enable(uart_dev, rx_buf, sizeof(rx_buf), RX_TIMEOUT_US);
 
@@ -212,4 +207,11 @@ void main(void) {
         }
         k_msleep(50);
     }
+}
+
+K_THREAD_DEFINE(uart_tid, 1024, uart_task, NULL, NULL, NULL, 5, 0, 0);
+
+void main(void) {
+    if (!device_is_ready(uart_dev)) return;
+    // UART task is auto-started by K_THREAD_DEFINE
 }
