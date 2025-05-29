@@ -81,6 +81,8 @@ void process_frame(const char *frame) {
             max_temp = t;
             snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
             send_uart_msg(response);
+            snprintf(response, sizeof(response), "Max temp = %d\r\n", max_temp);
+            send_uart_msg(response);
             break;
         }
         case 'C': {
