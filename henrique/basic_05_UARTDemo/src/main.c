@@ -43,7 +43,7 @@ void send_uart_msg(const char *msg) {
 void process_frame(const char *frame) {
     size_t len = strlen(frame);
     if (len < 5 || frame[0] != '#' || frame[len - 1] != '!') {
-        send_uart_msg("\r\n#Ef000!\r\n");
+        send_uart_msg("\r\n#Ef171!\r\n");
         return;
     }
 
@@ -161,14 +161,14 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
                         frame_buf[frame_pos++] = c;
                         awaiting_enter = true;
                     } else {
-                        send_uart_msg("\r\n#Ef000!\r\n");
+                        send_uart_msg("\r\n#Ef171!\r\n");
                         frame_pos = 0;
                         awaiting_enter = false;
                     }
                 } else if (frame_pos < FRAME_BUF_SIZE - 1) {
                     frame_buf[frame_pos++] = c;
                 } else {
-                    send_uart_msg("\r\n#Ef000!\r\n");
+                    send_uart_msg("\r\n#Ef171!\r\n");
                     frame_pos = 0;
                     awaiting_enter = false;
                 }
