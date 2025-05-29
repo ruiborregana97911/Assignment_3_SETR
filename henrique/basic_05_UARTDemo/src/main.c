@@ -19,12 +19,15 @@ static volatile int frame_pos = 0;
 static volatile bool frame_ready = false;
 static bool awaiting_enter = false;
 
+// substituir pela estrutura ja feita por ti para interligar os modulos
 int max_temp = 100;
 int current_temp = 75;
-char controller_params[64] = "Kp=10,Ki=5,Kd=1";
-int Kp = 10, Ki = 5, Kd = 1;
+int Kp = 10, Ki = 5, Kd = 1; // dividir por 10 posteriormente para evitar usar floats
 
-uint8_t calc_checksum(const char *cmd, const char *data) {
+
+char controller_params[64] = "Kp=10,Ki=5,Kd=1";
+
+uint8_t calc_checksum(const char *cmd, const char *data) {  
     uint8_t sum = cmd[0];
     for (size_t i = 0; i < strlen(data); i++) {
         sum += (uint8_t)data[i];
@@ -40,7 +43,7 @@ void send_uart_msg(const char *msg) {
     }
 }
 
-void process_frame(const char *frame) {
+void process_frame(const char *frame) { //cmd process do trabalho 2 +-
     size_t len = strlen(frame);
     if (len < 5 || frame[0] != '#' || frame[len - 1] != '!') {
         send_uart_msg("\r\n#Ef171!\r\n");
