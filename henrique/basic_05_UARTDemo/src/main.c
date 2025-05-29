@@ -119,6 +119,13 @@ void process_frame(const char *frame) {
             snprintf(controller_params, sizeof(controller_params), "Kp=%d,Ki=%d,Kd=%d", Kp, Ki, Kd);
             snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
             send_uart_msg(response);
+
+            snprintf(response, sizeof(response), "Kp = %d\r\n", Kp);
+            send_uart_msg(response);
+            snprintf(response, sizeof(response), "Ki = %d\r\n", Ki);
+            send_uart_msg(response);
+            snprintf(response, sizeof(response), "Kd = %d\r\n", Kd);
+            send_uart_msg(response);
             break;
         }
         default: {
