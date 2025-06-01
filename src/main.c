@@ -16,16 +16,29 @@
 #include <stdlib.h>
 #include <zephyr/drivers/pwm.h>		
 #include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/uart.h>
+#include <stdio.h>
+#include <string.h>
+#include <zephyr/timing/timing.h>   
+
 
 
 #define SLEEP_TIME_MS	1
 #define STACK_SIZE 1024
-#define PRIORITY_THREAD_TEMP 5
+#define PRIORITY_THREAD_TEMP 4
 #define PRIORITY_THREAD_LED 5
-#define PRIORITY_THREAD_PWM 5
+#define PRIORITY_THREAD_PWM 3
+#define PRIORITY_THREAD_UART 5
+
+/* Therad periodicity (in ms)*/
+#define THREAD_TEMP_PERIOD 500
+#define THREAD_PWM_PERIOD 250
+#define THREAD_LED_PERIOD 200
 
 #define PWM_NODE    DT_NODELABEL(pwm_led2)	// heaterpwm is the PWM node for the heater
 #define PWM_PERIOD_USEC 1000
+#define PWM_MIN 0.0f
+#define PWM_MAX 100.0f
 
 #define TC74_CMD_RTR 0x00   /* Read temperature command */
 #define TC74_CMD_RWCR 0x01  /* Read/write configuration register */
@@ -44,6 +57,13 @@
 
 /* I2C device vars and defines */
 #define I2C0_NID DT_NODELABEL(tc74sensor)
+
+/* UART defs*/
+#define UART_NODE DT_NODELABEL(uart0)
+#define RX_BUF_SIZE 64
+#define FRAME_BUF_SIZE 128
+#define TX_BUF_SIZE 128
+#define RX_TIMEOUT_US 100000
 
 
 /* Error codes */
@@ -68,7 +88,7 @@ typedef struct {
 K_MUTEX_DEFINE(rtdb_mutex);
 
 static rtdb_t RTDB = {
-	.cur_temp = 25,
+	.cur_temp = 0,
 	.setpoint = 30,
 	.max_temp = 50,
 	.system_on = false, 
@@ -78,6 +98,16 @@ static rtdb_t RTDB = {
 
 	
 };
+
+/* UART Vars*/
+const struct device *uart_dev = DEVICE_DT_GET(UART_NODE);
+static uint8_t rx_buf[RX_BUF_SIZE];
+static char frame_buf[FRAME_BUF_SIZE];
+static volatile int frame_pos = 0;
+static volatile bool frame_ready = false;
+static bool awaiting_enter = false;
+char controller_params[64] = "Kp=10,Ki=5,Kd=1";
+
 
 
 static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
@@ -89,10 +119,7 @@ static struct gpio_callback button2_cb_data;
 static const struct gpio_dt_spec button4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios, {0});
 static struct gpio_callback button4_cb_data;
 
-/*
- * The led0 devicetree alias is optional. If present, we'll use it
- * to turn on the LED whenever the button is pressed.
- */
+
 static struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET_OR(LED0_NODE, gpios, {0});
 static struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET_OR(LED1_NODE, gpios, {0});
 static struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET_OR(LED2_NODE, gpios, {0});
@@ -111,6 +138,18 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t
 
 float pid_compute(float kp,float ki,float kd,float *prev,float *intg, float setpoint, float temp, float dt);
 
+uint8_t calc_checksum(const char *cmd, const char *data);
+
+void send_uart_msg(const char *msg);
+
+void process_frame(const char *frame);
+
+static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data);
+
+
+
+
+
 /* Thread IDs */
 k_tid_t temp_sensor_tid;
 k_tid_t led_control_tid;
@@ -123,12 +162,19 @@ static struct k_thread temp_sensor_data;
 static struct k_thread led_control_data;
 static struct k_thread pwm_data;
 
+/* UART thread */
+k_tid_t uart_tid;
+K_THREAD_STACK_DEFINE(uart_stack, STACK_SIZE);
+static struct k_thread uart_data;
+
+
 void temp_sensor_thread(void *p1, void *p2, void *p3);
 
 void led_control_thread(void *p1, void *p2, void *p3);
 
 void pwm_control_thread(void *p1, void *p2, void *p3);
 
+void uart_task(void *arg1, void *arg2, void *arg3);
 
 
 int main(void)
@@ -155,9 +201,210 @@ int main(void)
 		pwm_control_thread, NULL, NULL, NULL,
 		PRIORITY_THREAD_PWM, 0, K_NO_WAIT);
 
+	uart_tid = k_thread_create(&uart_data, uart_stack, STACK_SIZE,
+					uart_task, NULL, NULL, NULL,
+					PRIORITY_THREAD_UART, 0, K_NO_WAIT);
+
 
     return 0;
 }
+
+
+
+uint8_t calc_checksum(const char *cmd, const char *data) {
+    uint8_t sum = cmd[0];
+    for (size_t i = 0; i < strlen(data); i++) {
+        sum += (uint8_t)data[i];
+    }
+    return sum % 256;
+}
+
+
+void send_uart_msg(const char *msg) {
+    while (*msg) {
+        uart_tx(uart_dev, msg, 1, SYS_FOREVER_MS);
+        msg++;
+        k_msleep(1);
+    }
+}
+
+void process_frame(const char *frame) {
+    size_t len = strlen(frame);
+    if (len < 5 || frame[0] != '#' || frame[len - 1] != '!') {
+        send_uart_msg("\r\n#Ef171!\r\n");
+        return;
+    }
+
+    char cmd = frame[1];
+    char data[64] = {0};
+    char cs_str[4] = {0};
+
+    if (cmd == 'C') {
+        strncpy(cs_str, &frame[2], 3);
+    } else {
+        int full_len = strlen(frame);
+        int data_len = full_len - 6; // remove # + CMD + CS(3) + !
+        if (data_len > 0 && data_len < (int)sizeof(data)) {
+            strncpy(data, &frame[2], data_len);
+            data[data_len] = '\0';
+        }
+        strncpy(cs_str, &frame[full_len - 4], 3);
+    }
+
+    int received_cs = atoi(cs_str);
+    char cmd_str[2] = {cmd, '\0'};
+    uint8_t computed_cs = calc_checksum(cmd_str, data);
+
+    char response[TX_BUF_SIZE];
+
+    if (computed_cs != received_cs) {
+        snprintf(response, sizeof(response), "\r\n#Es%03d!\r\n", calc_checksum("E", "s"));
+        send_uart_msg(response);
+        return;
+    }
+
+    switch (cmd) {
+        case 'M': {
+            int max_tmp = atoi(data);
+			k_mutex_lock(&rtdb_mutex, K_FOREVER);
+            RTDB.max_temp = max_tmp;
+            k_mutex_unlock(&rtdb_mutex);
+            snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
+            send_uart_msg(response);
+            snprintf(response, sizeof(response), "Max temp = %d\r\n", max_tmp);
+            send_uart_msg(response);
+            break;
+        }
+        case 'C': {
+            char t_str[8] = {0};
+			int current_temp;
+			k_mutex_lock(&rtdb_mutex, K_FOREVER);
+            current_temp = RTDB.cur_temp;
+            k_mutex_unlock(&rtdb_mutex);
+            snprintf(t_str, sizeof(t_str), "%03d", current_temp);
+            snprintf(response, sizeof(response), "\r\n#c%s%03d!\r\n", t_str, calc_checksum("c", t_str));
+            send_uart_msg(response);
+            break;
+        }
+        case 'S': {
+            if (strlen(data) != 9 || data[0] != 'p' || data[3] != 'i' || data[6] != 'd') {
+                snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+                send_uart_msg(response);
+                break;
+            }
+            char p_str[3] = {data[1], data[2], '\0'};
+            char i_str[3] = {data[4], data[5], '\0'};
+            char d_str[3] = {data[7], data[8], '\0'};
+
+            int p = atoi(p_str);
+            int i = atoi(i_str);
+            int d = atoi(d_str);
+
+            if (p < 0 || i < 0 || d < 0 || p > 99 || i > 99 || d > 99) {
+                snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+                send_uart_msg(response);
+                break;
+            }
+
+			k_mutex_lock(&rtdb_mutex, K_FOREVER);
+            RTDB.kp = p;
+            RTDB.ki = i;
+            RTDB.kd = d;
+            k_mutex_unlock(&rtdb_mutex);
+
+            snprintf(controller_params, sizeof(controller_params), "Kp=%d,Ki=%d,Kd=%d", p, i, d);
+            snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
+            send_uart_msg(response);
+
+            snprintf(response, sizeof(response), "Kp = %d\r\n", p);
+            send_uart_msg(response);
+            snprintf(response, sizeof(response), "Ki = %d\r\n", i);
+            send_uart_msg(response);
+            snprintf(response, sizeof(response), "Kd = %d\r\n", d);
+            send_uart_msg(response);
+            break;
+        }
+        default: {
+            snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+            send_uart_msg(response);
+            break;
+        }
+    }
+}
+
+static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data) {
+    switch (evt->type) {
+        case UART_RX_RDY:
+            for (size_t i = 0; i < evt->data.rx.len; i++) {
+                char c = evt->data.rx.buf[evt->data.rx.offset + i];
+
+                if (c == '\r' || c == '\n') {
+                    const char *nl = "\r\n";
+                    uart_tx(uart_dev, nl, strlen(nl), SYS_FOREVER_MS);
+                } else {
+                    uart_tx(uart_dev, &c, 1, SYS_FOREVER_MS);
+                }
+
+                if (frame_pos == 0 && c != '#') {
+                    frame_buf[frame_pos++] = c;
+                    awaiting_enter = true;
+                    continue;
+                }
+
+                if (awaiting_enter) {
+                    if (c == '\r' || c == '\n') {
+                        frame_buf[frame_pos] = '\0';
+                        frame_ready = true;
+                        frame_pos = 0;
+                        awaiting_enter = false;
+                    }
+                    continue;
+                }
+
+                if (c == '!') {
+                    if (frame_pos < FRAME_BUF_SIZE - 1) {
+                        frame_buf[frame_pos++] = c;
+                        awaiting_enter = true;
+                    } else {
+                        send_uart_msg("\r\n#Ef171!\r\n");
+                        frame_pos = 0;
+                        awaiting_enter = false;
+                    }
+                } else if (frame_pos < FRAME_BUF_SIZE - 1) {
+                    frame_buf[frame_pos++] = c;
+                } else {
+                    send_uart_msg("\r\n#Ef171!\r\n");
+                    frame_pos = 0;
+                    awaiting_enter = false;
+                }
+            }
+            break;
+
+        case UART_RX_DISABLED:
+            uart_rx_enable(uart_dev, rx_buf, sizeof(rx_buf), RX_TIMEOUT_US);
+            break;
+
+        default:
+            break;
+    }
+}
+
+void uart_task(void *arg1, void *arg2, void *arg3) {
+    uart_callback_set(uart_dev, uart_cb, NULL);
+    uart_rx_enable(uart_dev, rx_buf, sizeof(rx_buf), RX_TIMEOUT_US);
+
+    const char *welcome = "Pronto para comandos (#CMD...CS!)\r\n";
+    send_uart_msg(welcome);
+
+    while (1) {
+        if (frame_ready) {
+            process_frame(frame_buf);
+            frame_ready = false;
+        }
+        k_msleep(50);
+    }
+}
+
 
 void update_leds(void) {
 	k_mutex_lock(&rtdb_mutex, K_FOREVER);
@@ -197,6 +444,12 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t
 
 void temp_sensor_thread(void *p1, void *p2, void *p3) {
 
+	/* Local vars */
+    int64_t fin_time=0, release_time=0;     /* Timing variables to control task periodicity */  
+	
+	release_time = k_uptime_get() + THREAD_TEMP_PERIOD;
+        
+
     uint8_t temp = 0;
 	int ret=0;
     while (1) {
@@ -213,14 +466,31 @@ void temp_sensor_thread(void *p1, void *p2, void *p3) {
 				k_mutex_lock(&rtdb_mutex, K_FOREVER);
 				RTDB.cur_temp = temp;
 				k_mutex_unlock(&rtdb_mutex);
-				printk("[SENSOR] Current temperature: %d°C\n", temp);
-				k_sleep(K_MSEC(500));
+				//printk("[SENSOR] Current temperature: %d°C\n", temp);
+				//k_sleep(K_MSEC(500));
 			}
+
+			
+		}
+		
+		/* Control the task periodicity */
+		fin_time = k_uptime_get();
+		if (fin_time < release_time) {
+			k_msleep(release_time - fin_time);
+			release_time += THREAD_TEMP_PERIOD;
 		}
     }
+	
+
 }
 
 void led_control_thread(void *p1, void *p2, void *p3) {
+
+	/* Local vars */
+    int64_t fin_time=0, release_time=0;     /* Timing variables to control task periodicity */  
+	
+	release_time = k_uptime_get() + THREAD_LED_PERIOD;
+
     while (1) {
 		k_mutex_lock(&rtdb_mutex, K_FOREVER);
         bool sys_on = RTDB.system_on;
@@ -235,7 +505,12 @@ void led_control_thread(void *p1, void *p2, void *p3) {
             gpio_pin_set_dt(&led4, 0);
         }
 
-        k_sleep(K_MSEC(500));
+        /* Control the task periodicity */
+		fin_time = k_uptime_get();
+		if (fin_time < release_time) {
+			k_msleep(release_time - fin_time);
+			release_time += THREAD_LED_PERIOD;
+		}
     }
     
 }
@@ -245,14 +520,39 @@ void led_control_thread(void *p1, void *p2, void *p3) {
 float pid_compute(float kp,float ki,float kd,float *prev,float *intg, float setpoint, float temp, float dt) {
 	
     float error = setpoint - temp;
-    *intg += error * dt;
+    //*intg += error * dt;
     float derivative = (error - *prev) / dt;
-    *prev = error;
-    return kp * error + ki * (*intg) + kd * derivative;
+    
+	// Cálculo prévio da saída sem atualizar a integral ainda
+    float output_pre = kp * error + ki * (*intg) + kd * derivative;
+
+	// Anti-windup
+	if ((output_pre < PWM_MAX && output_pre > PWM_MIN) ||
+    	(output_pre >= PWM_MAX && error < 0) ||  
+    	(output_pre <= PWM_MIN && error > 0)) {
+    	*intg += error * dt;
+	}
+
+
+	float output = kp * error + ki * (*intg) + kd * derivative;
+
+	// Clamp output to PWM range
+	if (output < PWM_MIN) {
+		output = PWM_MIN;
+	} else if (output > PWM_MAX) {
+		output = PWM_MAX;
+	}
+
+	*prev = error;
+    return output;
 }
 
 
 void pwm_control_thread(void *p1, void *p2, void *p3) {
+
+	/* Local vars */
+    int64_t fin_time=0, release_time=0;     /* Timing variables to control task periodicity */    
+	release_time = k_uptime_get() + THREAD_PWM_PERIOD;
 
 	float prev_error = 0.0f;
 	float integral = 0.0f;		
@@ -272,13 +572,21 @@ void pwm_control_thread(void *p1, void *p2, void *p3) {
             int duty = CLAMP(out, 0, 100);
 			//int duty = 50; // For testing, set a fixed duty cycle
             pwm_set_dt(&heater_pwm, PWM_USEC(PWM_PERIOD_USEC), PWM_USEC(PWM_PERIOD_USEC * duty / 100));
-            printk("[PWM] Duty set to: %d%%\n", duty);
+            //printk("[PWM] Duty set to: %d%%\n", duty);
         } else {
             pwm_set_dt(&heater_pwm, PWM_USEC(PWM_PERIOD_USEC), PWM_USEC(0));
         }
 
-        k_sleep(K_MSEC(500));
-    }
+        /* Control the task periodicity */
+		fin_time = k_uptime_get();
+		if (fin_time < release_time) {
+			k_msleep(release_time - fin_time);
+			release_time += THREAD_PWM_PERIOD;
+		}
+
+	}
+
+
 }
 
 
@@ -446,13 +754,17 @@ int HWInit(void){
     
     /* Write (command RTR) to set the read address to temperature */
     /* Only necessary if a config done before (not the case), but let's stay in the safe side */
-    ret = i2c_write_dt(&dev_i2c, TC74_CMD_RTR, 1);
+    /*ret = i2c_write_dt(&dev_i2c, TC74_CMD_RTR, 1);
     if(ret != 0){
         printk("Failed to write to I2C device at address %x, register %x \n\r", dev_i2c.addr ,TC74_CMD_RTR);
-    }
+    }*/
 
+	/* UART configuration*/
 
-
+	if (!device_is_ready(uart_dev)) {
+		printk("Error: UART device %s is not ready\n", uart_dev->name);
+		return ERR_RDY;
+	}
 
 	return ERR_OK;
 }
