@@ -146,7 +146,7 @@ void process_frame(const char *frame);
 
 static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data);
 
-
+void print_float_as_string(char *buffer, size_t size, float val);
 
 
 
@@ -228,6 +228,15 @@ void send_uart_msg(const char *msg) {
     }
 }
 
+void print_float_as_string(char *buffer, size_t size, float val) {
+    int int_part = (int)val;
+    int decimal_part = (int)((val - int_part) * 10);  // 1 casa decimal
+    if (decimal_part < 0) decimal_part = -decimal_part;
+
+    snprintf(buffer, size, "%d.%d", int_part, decimal_part);
+}
+
+
 void process_frame(const char *frame) {
     size_t len = strlen(frame);
     if (len < 5 || frame[0] != '#' || frame[len - 1] != '!') {
@@ -286,44 +295,78 @@ void process_frame(const char *frame) {
             send_uart_msg(response);
             break;
         }
-        case 'S': {
-            if (strlen(data) != 9 || data[0] != 'p' || data[3] != 'i' || data[6] != 'd') {
-                snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
-                send_uart_msg(response);
-                break;
-            }
-            char p_str[3] = {data[1], data[2], '\0'};
-            char i_str[3] = {data[4], data[5], '\0'};
-            char d_str[3] = {data[7], data[8], '\0'};
+        case 'S': {	
 
-            int p = atoi(p_str);
-            int i = atoi(i_str);
-            int d = atoi(d_str);
+            // Espera-se exatamente 15 chars de dados: pXX.XiXX.XdXX.X
+			if (strlen(data) != 12) {
+				snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+				send_uart_msg(response);
+				break;
+			}
 
-            if (p < 0 || i < 0 || d < 0 || p > 99 || i > 99 || d > 99) {
-                snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
-                send_uart_msg(response);
-                break;
-            }
+			// Validar as posições fixas dos identificadores p, i, d
+			if (data[0] != 'p' || data[4] != 'i' || data[8] != 'd') {
+				snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+				send_uart_msg(response);
+				break;
+			}
+
+			
+
+			// Extrair os valores float (4 chars cada)
+			char p_str[5] = { data[1], data[2], data[3], '\0' };   
+			char i_str[5] = { data[5], data[6], data[7], '\0' };   
+			char d_str[5] = { data[9], data[10], data[11], '\0' };
+
+			int p_int = atoi(p_str);
+			int i_int = atoi(i_str);
+			int d_int = atoi(d_str); 
+
+			if (p_int < 0 || i_int < 0 || d_int < 0 || p_int > 999 || i_int > 999 || d_int > 999) {
+				snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
+				send_uart_msg(response);
+				break;
+			}
+
+			// Converte para float dividindo por 10 (último dígito decimal)
+			float p = p_int / 10.0f;
+			float i = i_int / 10.0f;
+			float d = d_int / 10.0f;
 
 			k_mutex_lock(&rtdb_mutex, K_FOREVER);
-            RTDB.kp = p;
-            RTDB.ki = i;
-            RTDB.kd = d;
-            k_mutex_unlock(&rtdb_mutex);
+			RTDB.kp = p;
+			RTDB.ki = i;
+			RTDB.kd = d;
+			k_mutex_unlock(&rtdb_mutex);
 
-            snprintf(controller_params, sizeof(controller_params), "Kp=%d,Ki=%d,Kd=%d", p, i, d);
-            snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
-            send_uart_msg(response);
 
-            snprintf(response, sizeof(response), "Kp = %d\r\n", p);
-            send_uart_msg(response);
-            snprintf(response, sizeof(response), "Ki = %d\r\n", i);
-            send_uart_msg(response);
-            snprintf(response, sizeof(response), "Kd = %d\r\n", d);
-            send_uart_msg(response);
-            break;
+			snprintf(response, sizeof(response), "\r\n#Eo%03d!\r\n", calc_checksum("E", "o"));
+			send_uart_msg(response);
+
+			break;
+            
         }
+		case 'G': {  // Get PID parameters
+			// Retorna os parâmetros no formato #gpPPP iIII dDDD xxx!
+			float p, i, d;
+			k_mutex_lock(&rtdb_mutex, K_FOREVER);
+			p = RTDB.kp;
+			i = RTDB.ki;
+			d = RTDB.kd;
+			k_mutex_unlock(&rtdb_mutex);
+		
+			int p_int = (int)(p * 10);
+			int i_int = (int)(i * 10);
+			int d_int = (int)(d * 10);
+		
+			char pid_str[20];
+			snprintf(pid_str, sizeof(pid_str), "p%03di%03dd%03d", p_int, i_int, d_int);
+		
+			snprintf(response, sizeof(response), "\r\n#g%s%03d!\r\n", pid_str, calc_checksum("g", pid_str));
+			send_uart_msg(response);
+			break;
+		}
+		
         default: {
             snprintf(response, sizeof(response), "\r\n#Ei%03d!\r\n", calc_checksum("E", "i"));
             send_uart_msg(response);
