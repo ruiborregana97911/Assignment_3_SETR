@@ -32,8 +32,8 @@
 
 /* Therad periodicity (in ms)*/
 #define THREAD_TEMP_PERIOD 500
-#define THREAD_PWM_PERIOD 250
-#define THREAD_LED_PERIOD 200
+#define THREAD_PWM_PERIOD 200
+#define THREAD_LED_PERIOD 250
 
 #define PWM_NODE    DT_NODELABEL(pwm_led2)	// heaterpwm is the PWM node for the heater
 #define PWM_PERIOD_USEC 1000
@@ -296,6 +296,7 @@ void process_frame(const char *frame) {
             break;
         }
         case 'S': {	
+
 
             // Espera-se exatamente 15 chars de dados: pXX.XiXX.XdXX.X
 			if (strlen(data) != 12) {
