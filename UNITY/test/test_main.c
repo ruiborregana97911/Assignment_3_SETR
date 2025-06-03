@@ -206,6 +206,51 @@ void test_cmd_C_leitura_temperatura(void) {
 }
 
 
+// ---------------------------
+// Testes para pid_compute
+// ---------------------------
+
+void test_pid_output_comum(void) {
+    float prev = 0.0f, intg = 0.0f;
+    float output = pid_compute(2.0f, 1.0f, 0.5f, &prev, &intg, 10.0f, 8.0f, 1.0f);
+    // error = 2, derivative = 2, intg += 2 => 2
+    // output = 2*2 + 1*2 + 0.5*2 = 4 + 2 + 1 = 7
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 7.0f, output);
+}
+
+void test_pid_com_integral_windup_bloqueado(void) {
+    float prev = 0.0f, intg = 1000.0f;  // grande integral
+    float output = pid_compute(1.0f, 5.0f, 0.0f, &prev, &intg, 10.0f, 0.0f, 1.0f);
+    // output_pre já será grande -> integral não deve crescer mais
+    // espera-se saída == PWM_MAX
+    TEST_ASSERT_EQUAL_FLOAT(PWM_MAX, output);
+}
+
+void test_pid_integral_é_atualizada_ao_diminuir_erro(void) {
+    float prev = 0.0f, intg = 5.0f;
+    float output = pid_compute(1.0f, 1.0f, 0.0f, &prev, &intg, 3.0f, 5.0f, 1.0f);
+    // error = -2 → intg = 3 → output = -2 + 3 = 1
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 1.0f, output);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 3.0f, intg);
+}
+
+void test_pid_saturacao_minima(void) {
+    float prev = 0.0f, intg = -1000.0f;
+    float output = pid_compute(2.0f, 5.0f, 0.0f, &prev, &intg, 0.0f, 10.0f, 1.0f);
+    TEST_ASSERT_EQUAL_FLOAT(PWM_MIN, output);
+}
+
+void test_pid_derivada_afeta_saida(void) {
+    float prev = 5.0f, intg = 0.0f;
+    float output = pid_compute(0.0f, 0.0f, 1.0f, &prev, &intg, 5.0f, 10.0f, 1.0f);
+    // error = -5, prev = 5 → derivative = -10
+    // output = kd * derivative = 1.0 * -10 = -10 → PWM_MIN
+    TEST_ASSERT_EQUAL_FLOAT(PWM_MIN, output);
+}
+
+
+
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -231,6 +276,13 @@ int main(void) {
     RUN_TEST(test_cmd_S_pid_valido);
     RUN_TEST(test_cmd_S_pid_invalido_mal_formado);
     RUN_TEST(test_cmd_G_leitura_pid);
+    
+    // Testes PID
+    RUN_TEST(test_pid_output_comum);
+RUN_TEST(test_pid_com_integral_windup_bloqueado);
+RUN_TEST(test_pid_integral_é_atualizada_ao_diminuir_erro);
+RUN_TEST(test_pid_saturacao_minima);
+RUN_TEST(test_pid_derivada_afeta_saida);
 
     return UNITY_END();
 }

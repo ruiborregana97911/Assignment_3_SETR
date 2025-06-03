@@ -162,3 +162,34 @@ void process_frame(const char *frame) {
         }
     }
 }
+
+
+float pid_compute(float kp,float ki,float kd,float *prev,float *intg, float setpoint, float temp, float dt) {
+	
+    float error = setpoint - temp;
+    //*intg += error * dt;
+    float derivative = (error - *prev) / dt;
+    
+	// Cálculo prévio da saída sem atualizar a integral ainda
+    float output_pre = kp * error + ki * (*intg) + kd * derivative;
+
+	// Anti-windup
+	if ((output_pre < PWM_MAX && output_pre > PWM_MIN) ||
+    	(output_pre >= PWM_MAX && error < 0) ||  
+    	(output_pre <= PWM_MIN && error > 0)) {
+    	*intg += error * dt;
+	}
+
+
+	float output = kp * error + ki * (*intg) + kd * derivative;
+
+	// Clamp output to PWM range
+	if (output < PWM_MIN) {
+		output = PWM_MIN;
+	} else if (output > PWM_MAX) {
+		output = PWM_MAX;
+	}
+
+	*prev = error;
+    return output;
+}

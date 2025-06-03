@@ -20,4 +20,9 @@ void print_float_as_string(char *buffer, size_t size, float val);
 void process_frame(const char *frame);
 void send_uart_msg(const char *msg);
 
+#define PWM_MIN 0.0f
+#define PWM_MAX 100.0f
+float pid_compute(float kp, float ki, float kd, float *prev, float *intg, float setpoint, float temp, float dt);
+
+
 #endif
